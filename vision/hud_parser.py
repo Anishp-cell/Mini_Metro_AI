@@ -33,6 +33,8 @@ class HUDState:
     spare_tunnels: int
     is_paused: bool
     is_game_over: bool
+    spare_train_positions: list = None
+    spare_carriage_positions: list = None
 
 
 # =============================================================================
@@ -92,8 +94,12 @@ class HUDParser:
         hud_top = int(h * (1.0 - config.HUD_REGION_BOTTOM_RATIO))
         hud_region = frame[hud_top:, :]
 
-        # Count resources
-        trains, carriages, tunnels = self._count_resources(hud_region)
+        # Count resources and find their positions
+        trains, carriages, tunnels, train_pos, carriage_pos = self._count_resources(hud_region)
+
+        # Convert relative HUD positions to absolute frame positions
+        absolute_train_pos = [(x, y + hud_top) for x, y in train_pos]
+        absolute_carriage_pos = [(x, y + hud_top) for x, y in carriage_pos]
 
         # Detect pause state
         is_paused = self._detect_pause(frame)
@@ -107,9 +113,11 @@ class HUDParser:
             spare_tunnels=tunnels,
             is_paused=is_paused,
             is_game_over=is_game_over,
+            spare_train_positions=absolute_train_pos,
+            spare_carriage_positions=absolute_carriage_pos,
         )
 
-    def _count_resources(self, hud_region: np.ndarray) -> Tuple[int, int, int]:
+    def _count_resources(self, hud_region: np.ndarray) -> Tuple[int, int, int, list, list]:
         """
         Count spare trains, carriages, and tunnels in the HUD.
 
@@ -119,16 +127,18 @@ class HUDParser:
         if self._templates:
             return self._count_by_templates(hud_region)
         else:
-            return self._count_by_contours(hud_region)
+            t_count, c_count, tun_count = self._count_by_contours(hud_region)
+            return t_count, c_count, tun_count, [], []
 
-    def _count_by_templates(self, hud_region: np.ndarray) -> Tuple[int, int, int]:
-        """Count resources using template matching."""
+    def _count_by_templates(self, hud_region: np.ndarray) -> Tuple[int, int, int, list, list]:
+        """Count resources using template matching and find their positions."""
         gray = cv2.cvtColor(hud_region, cv2.COLOR_BGR2GRAY)
         counts = {"train": 0, "carriage": 0, "tunnel": 0}
+        positions = {"train": [], "carriage": [], "tunnel": []}
 
         for name, template in self._templates.items():
-            # Multi-scale template matching for robustness
             best_count = 0
+            best_points = []
 
             for scale in [0.8, 0.9, 1.0, 1.1, 1.2]:
                 th, tw = template.shape[:2]
@@ -145,15 +155,20 @@ class HUDParser:
                 result = cv2.matchTemplate(gray, scaled, cv2.TM_CCOEFF_NORMED)
                 locations = np.where(result >= config.TEMPLATE_MATCH_THRESHOLD)
 
-                # Non-maximum suppression: merge detections within 20px
                 if len(locations[0]) > 0:
                     points = list(zip(locations[1].tolist(), locations[0].tolist()))
-                    merged = self._nms_points(points, dist_threshold=20)
-                    best_count = max(best_count, len(merged))
+                    # Filter points to only be in the right side of the HUD (x > w * 0.6)
+                    points = [(px, py) for px, py in points if (px + new_w // 2) > gray.shape[1] * 0.6]
+                    if points:
+                        merged = self._nms_points(points, dist_threshold=20)
+                        if len(merged) > best_count:
+                            best_count = len(merged)
+                            best_points = [(x + new_w // 2, y + new_h // 2) for x, y in merged]
 
             counts[name] = best_count
+            positions[name] = best_points
 
-        return counts["train"], counts["carriage"], counts["tunnel"]
+        return counts["train"], counts["carriage"], counts["tunnel"], positions["train"], positions["carriage"]
 
     def _count_by_contours(self, hud_region: np.ndarray) -> Tuple[int, int, int]:
         """

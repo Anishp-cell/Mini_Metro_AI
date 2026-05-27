@@ -32,6 +32,7 @@ class DetectedLine:
     path_points: List[Tuple[int, int]]   # skeleton pixel coordinates
     pixel_count: int                     # total colored pixels (line thickness indicator)
     mask: Optional[np.ndarray] = field(default=None, repr=False)  # binary mask for this line
+    endpoints: List[Tuple[int, int]] = field(default_factory=list) # geometric endpoints (T-caps)
 
 
 # =============================================================================
@@ -58,6 +59,8 @@ class LineDetector:
 
     def __init__(self):
         self.color_ranges = config.load_calibrated_colors()
+        from vision.line_end_detector import LineEndDetector
+        self.end_detector = LineEndDetector()
 
     def detect(
         self,
@@ -114,6 +117,9 @@ class LineDetector:
             # Skeletonize to get the center path of the line
             skeleton = self._skeletonize(mask_clean)
 
+            # Detect endpoints
+            endpoints = self.end_detector.get_endpoints(mask_clean, skeleton)
+
             # Extract path points from skeleton
             path_points = self._extract_path_points(skeleton)
 
@@ -130,6 +136,7 @@ class LineDetector:
                 path_points=path_points,
                 pixel_count=pixel_count,
                 mask=mask_clean,
+                endpoints=endpoints,
             ))
 
         return lines

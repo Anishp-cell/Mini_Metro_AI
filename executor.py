@@ -168,26 +168,19 @@ class Executor:
         logger.info(f"Delete line segment at {point_pos}")
         self.click_at(*point_pos, button="right")
 
-    def add_train_to_line(self, line_point_pos: Tuple[int, int]):
+    def add_train_to_line(self, hud_train_pos: Tuple[int, int], target_station_pos: Tuple[int, int]):
         """
-        Add a spare train to a line.
-        
-        In Mini Metro, you drag the train icon from the HUD onto a line.
-        This requires knowing the HUD train icon position.
-        
-        For now, we click on the line — the exact HUD interaction may
-        need calibration.
+        Add a spare train to a line by dragging it from the HUD onto the target station.
         """
-        logger.info(f"Add train to line at {line_point_pos}")
-        # TODO: Implement HUD drag interaction when templates are calibrated
-        # For now, click on the line (may need adjustment)
-        self.click_at(*line_point_pos)
+        logger.info(f"Add train: drag from HUD {hud_train_pos} -> station {target_station_pos}")
+        self.drag(hud_train_pos, target_station_pos)
 
-    def add_carriage_to_line(self, line_point_pos: Tuple[int, int]):
-        """Add a spare carriage to a line."""
-        logger.info(f"Add carriage to line at {line_point_pos}")
-        # TODO: Same HUD drag interaction needed
-        self.click_at(*line_point_pos)
+    def add_carriage_to_line(self, hud_carriage_pos: Tuple[int, int], target_station_pos: Tuple[int, int]):
+        """
+        Add a spare carriage to a line by dragging it from the HUD onto the target station.
+        """
+        logger.info(f"Add carriage: drag from HUD {hud_carriage_pos} -> station {target_station_pos}")
+        self.drag(hud_carriage_pos, target_station_pos)
 
     # -----------------------------------------------------------------
     # High-level action dispatcher
@@ -233,24 +226,21 @@ class Executor:
                 return False
 
         elif t == "add_train":
-            # Use the first station on the line as the click target
-            station_ids = action.params.get("line_station_ids", [])
-            if station_ids:
-                # We need pixel positions — stored in params or need lookup
-                pos = action.params.get("click_pos")
-                if pos:
-                    self.add_train_to_line(pos)
-                else:
-                    logger.warning("add_train: no click_pos in params")
-                    return False
+            hud_pos = action.params.get("hud_pos")
+            station_pos = action.params.get("station_pos")
+            if hud_pos and station_pos:
+                self.add_train_to_line(hud_pos, station_pos)
+            else:
+                logger.warning(f"add_train missing positions: {action.params}")
+                return False
 
         elif t == "add_carriage":
-            station_ids = action.params.get("line_station_ids", [])
-            pos = action.params.get("click_pos")
-            if pos:
-                self.add_carriage_to_line(pos)
+            hud_pos = action.params.get("hud_pos")
+            station_pos = action.params.get("station_pos")
+            if hud_pos and station_pos:
+                self.add_carriage_to_line(hud_pos, station_pos)
             else:
-                logger.warning("add_carriage: no click_pos in params")
+                logger.warning(f"add_carriage missing positions: {action.params}")
                 return False
 
         elif t == "reroute_line":

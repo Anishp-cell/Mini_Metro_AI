@@ -45,6 +45,7 @@ class Line:
     color: str
     station_ids: List[int]
     load_score: float = 0.0  # sum of queue sizes of connected stations
+    endpoints: List[Tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -53,6 +54,8 @@ class Resources:
     spare_trains: int = 0
     spare_carriages: int = 0
     spare_tunnels: int = 0
+    spare_train_positions: List[Tuple[int, int]] = field(default_factory=list)
+    spare_carriage_positions: List[Tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -121,10 +124,13 @@ class StateBuilder:
                 for sid in dl.station_ids
                 if sid in station_map
             )
+            # Retrieve endpoints if they exist on dl (default to empty if not added yet)
+            endpoints = getattr(dl, "endpoints", [])
             lines.append(Line(
                 color=dl.color,
                 station_ids=dl.station_ids,
                 load_score=load,
+                endpoints=endpoints,
             ))
 
         # Resources
@@ -132,6 +138,8 @@ class StateBuilder:
             spare_trains=hud_state.spare_trains,
             spare_carriages=hud_state.spare_carriages,
             spare_tunnels=hud_state.spare_tunnels,
+            spare_train_positions=getattr(hud_state, "spare_train_positions", []),
+            spare_carriage_positions=getattr(hud_state, "spare_carriage_positions", []),
         )
 
         # Build graph

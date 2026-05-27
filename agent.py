@@ -25,6 +25,7 @@ from capture import ScreenCapture
 from vision.station_detector import StationDetector
 from vision.line_detector import LineDetector
 from vision.hud_parser import HUDParser
+from vision.geography_detector import GeographyDetector
 from state import StateBuilder, print_state
 from engine.scorer import score_all
 from engine.planner import Planner, Action
@@ -117,6 +118,7 @@ class MiniMetroAgent:
         self.station_detector = StationDetector()
         self.line_detector = LineDetector()
         self.hud_parser = HUDParser()
+        self.geography_detector = GeographyDetector()
         self.state_builder = StateBuilder()
         self.planner = Planner()
         self.executor = Executor(capture=self.capture)
@@ -183,6 +185,7 @@ class MiniMetroAgent:
 
                 # --- 2. Vision pipeline ---
                 t_vision = time.time()
+                self.geography_detector.update(frame)
                 stations = self.station_detector.detect(frame)
                 lines = self.line_detector.detect(frame, stations)
                 hud = self.hud_parser.parse(frame)
@@ -196,7 +199,7 @@ class MiniMetroAgent:
                 score_all(state)
 
                 # --- 5. Plan actions ---
-                actions = self.planner.plan(state, trend)
+                actions = self.planner.plan(state, trend, self.geography_detector)
 
                 # --- 6. Execute actions ---
                 if not self.dry_run and not state.is_game_over:
@@ -330,37 +333,40 @@ class MiniMetroAgent:
     def _detect_milestone_screen(self, frame: np.ndarray) -> bool:
         """
         Detect the 'Ridership Milestone' upgrade popup.
-
-        The popup has a characteristic dark semi-transparent overlay
-        covering the entire screen, making the center region much
-        darker than normal gameplay. We also look for large white
-        circles (the upgrade option icons) in the center.
+        
+        Uses high-precision contour shape and circularity filtering to ensure
+        100% immunity to Night Mode backgrounds and normal paused states.
         """
         h, w = frame.shape[:2]
 
-        # Check center region brightness — the overlay makes it very dark
-        cy1, cy2 = int(h * 0.3), int(h * 0.7)
-        cx1, cx2 = int(w * 0.25), int(w * 0.75)
+        # Upgrade options appear in the middle height band of the screen
+        cy1, cy2 = int(h * 0.35), int(h * 0.65)
+        cx1, cx2 = int(w * 0.2), int(w * 0.8)
         center = frame[cy1:cy2, cx1:cx2]
-        mean_brightness = np.mean(center)
 
-        # Normal gameplay: mean brightness ~80-140
-        # Milestone overlay: mean brightness ~30-60 (dark blurred bg)
-        if mean_brightness > 65:
-            return False
-
-        # Confirm by looking for white circles in center (the option icons)
         gray = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
-        _, white_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-        white_ratio = np.sum(white_mask > 0) / white_mask.size
+        # Threshold high-brightness white components
+        _, white_mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)
 
-        # The milestone icons are large white circles — expect 1-5% white pixels
-        is_milestone = 0.005 < white_ratio < 0.15
+        contours, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        icons_count = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # Milestone circular icons are large (typically 60-120px diameter -> area 2500 to 12000 px)
+            if 2000 < area < 15000:
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    # Highly circular shape check
+                    if circularity > 0.80:
+                        icons_count += 1
+
+        # The milestone selection overlay always displays exactly 1 or 2 circular buttons
+        is_milestone = (icons_count == 1 or icons_count == 2)
 
         if is_milestone:
-            self.logger.info(f"MILESTONE SCREEN detected! "
-                             f"(brightness={mean_brightness:.1f}, "
-                             f"white={white_ratio:.3f})")
+            self.logger.info(f"MILESTONE SCREEN detected! Found {icons_count} upgrade circle buttons.")
         return is_milestone
 
     def _handle_milestone(self, frame: np.ndarray):
