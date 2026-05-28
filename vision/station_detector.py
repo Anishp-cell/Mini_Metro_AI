@@ -221,6 +221,18 @@ class StationDetector:
             cx = int(M["m10"] / M["m00"])
             cy = int(M["m01"] / M["m00"]) + top_margin  # offset back to full frame
 
+            # Reject HUD, color palette, and bottom corner false positives using localized exclusions
+            # center color palette & locked track placeholders
+            if 0.28 * w < cx < 0.72 * w and cy > h * 0.76:
+                continue
+            # bottom right assets & river bends
+            if cx > w * 0.83 and cy > h * 0.78:
+                continue
+            # bottom left line selectors
+            if cx < w * 0.17 and cy > h * 0.78:
+                continue
+
+
             # Classify shape
             shape = classify_shape(contour, area)
 

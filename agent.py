@@ -369,16 +369,109 @@ class MiniMetroAgent:
             self.logger.info(f"MILESTONE SCREEN detected! Found {icons_count} upgrade circle buttons.")
         return is_milestone
 
+    def _classify_upgrade_option(self, frame: np.ndarray, cx: int, cy: int) -> str:
+        """
+        Classifies the milestone upgrade option inside the circle centered at (cx, cy).
+        Returns one of: "train", "carriage", "tunnel", "line", "interchange", "unknown"
+        """
+        h, w = frame.shape[:2]
+        r = 45  # Crop radius around center
+        
+        # Keep bounds inside frame
+        x1, x2 = max(0, cx - r), min(w, cx + r)
+        y1, y2 = max(0, cy - r), min(h, cy + r)
+        crop = frame[y1:y2, x1:x2]
+        
+        if crop.size == 0:
+            return "unknown"
+            
+        # 1. Color/Saturation Check for "Line"
+        # In Mini Metro, a new Line option shows a highly saturated colored circle/badge.
+        # Other assets (Train, Carriage, Tunnel, Interchange) are neutral gray/black.
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        sat_mask = (hsv[:, :, 1] > 80) & (hsv[:, :, 2] > 80)
+        sat_pixels = np.sum(sat_mask)
+        if sat_pixels > 150:
+            self.logger.info(f"Classified option at ({cx}, {cy}) as 'line' (colored pixels: {sat_pixels})")
+            return "line"
+            
+        # 2. Extract inner area of the option circle to analyze the gray/black icon
+        ch, cw = crop.shape[:2]
+        icx, icy = cw // 2, ch // 2
+        ri = 20
+        inner = crop[icy - ri : icy + ri, icx - ri : icx + ri]
+        if inner.size == 0:
+            return "unknown"
+            
+        inner_gray = cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY)
+        
+        # 3. Match against Train and Carriage templates from HUDParser
+        train_template = self.hud_parser._templates.get("train")
+        carriage_template = self.hud_parser._templates.get("carriage")
+        
+        def match_score(img, template):
+            if template is None:
+                return 0.0
+            best_val = 0.0
+            for scale in [1.0, 1.2, 1.5, 1.8, 2.2]:
+                th, tw = template.shape[:2]
+                nw, nh = int(tw * scale), int(th * scale)
+                if nw > img.shape[1] or nh > img.shape[0]:
+                    continue
+                resized = cv2.resize(template, (nw, nh))
+                res = cv2.matchTemplate(img, resized, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+                if max_val > best_val:
+                    best_val = max_val
+            return best_val
+            
+        train_val = match_score(inner_gray, train_template)
+        carriage_val = match_score(inner_gray, carriage_template)
+        
+        self.logger.info(f"Option at ({cx}, {cy}) template match scores — Train: {train_val:.2f}, Carriage: {carriage_val:.2f}")
+        
+        if train_val > 0.62 and train_val > carriage_val:
+            return "train"
+        if carriage_val > 0.62 and carriage_val > train_val:
+            return "carriage"
+            
+        # 4. Fallback: Shape/Contour Heuristics on segmented icon
+        _, thresh = cv2.threshold(inner_gray, 140, 255, cv2.THRESH_BINARY_INV)
+        cnts, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not cnts:
+            return "unknown"
+            
+        valid_cnts = [c for c in cnts if cv2.contourArea(c) > 10]
+        
+        if len(valid_cnts) >= 2:
+            return "tunnel"
+            
+        if len(valid_cnts) == 1:
+            cnt = valid_cnts[0]
+            area = cv2.contourArea(cnt)
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            solidity = area / hull_area if hull_area > 0 else 0.0
+            
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            aspect = bw / bh if bh > 0 else 1.0
+            
+            if solidity < 0.65 and 0.8 < aspect < 1.25:
+                return "interchange"
+            if aspect > 2.0:
+                return "tunnel"
+                
+        return "unknown"
+
     def _handle_milestone(self, frame: np.ndarray):
         """
         Handle the milestone popup by clicking the best upgrade option.
 
         Strategy:
-        - If two options visible: click the LEFT one (usually Locomotive or Line)
-        - If one option (announcement): click center to dismiss
-
-        Upgrade priority: Locomotive > Line > Carriage > Tunnel
-        The left option tends to be the better one.
+        - Classify left and right options using visual features and templates.
+        - Prioritize dynamically: Tunnel (if 0 left) > Train > Carriage/Interchange > Line.
+        - Click the option with the higher priority score.
         """
         h, w = frame.shape[:2]
 
@@ -409,10 +502,46 @@ class MiniMetroAgent:
             icons.append((icon_cx, icon_cy, area))
 
         if len(icons) >= 2:
-            # Two options — click the LEFT one (sort by x)
+            # Two options — classify and score them
             icons.sort(key=lambda ic: ic[0])
-            click_x, click_y = icons[0][0], icons[0][1]
-            self.logger.info(f"Milestone: 2 options, clicking LEFT at ({click_x}, {click_y})")
+            left_cx, left_cy = icons[0][0], icons[0][1]
+            right_cx, right_cy = icons[1][0], icons[1][1]
+            
+            left_opt = self._classify_upgrade_option(frame, left_cx, left_cy)
+            right_opt = self._classify_upgrade_option(frame, right_cx, right_cy)
+            
+            # Query last known state for dynamic priorities
+            last_state = None
+            if hasattr(self, 'state_builder') and self.state_builder._history:
+                last_state = self.state_builder._history[-1]
+                
+            num_lines = len(last_state.lines) if last_state else 3
+            spare_tunnels = last_state.resources.spare_tunnels if last_state else 1
+            
+            priorities = {
+                "train": 3,
+                "carriage": 2 if num_lines >= 3 else 1,
+                "tunnel": 4 if spare_tunnels == 0 else 1,
+                "line": 3 if num_lines < 4 else 0,
+                "interchange": 2 if num_lines >= 4 else 1,
+                "unknown": 0
+            }
+            
+            left_prio = priorities.get(left_opt, 0)
+            right_prio = priorities.get(right_opt, 0)
+            
+            self.logger.info(
+                f"Milestone Options: LEFT is '{left_opt}' (priority {left_prio}) | "
+                f"RIGHT is '{right_opt}' (priority {right_prio})"
+            )
+            
+            if left_prio >= right_prio:
+                click_x, click_y = left_cx, left_cy
+                self.logger.info(f"Milestone: Clicking LEFT option '{left_opt}'")
+            else:
+                click_x, click_y = right_cx, right_cy
+                self.logger.info(f"Milestone: Clicking RIGHT option '{right_opt}'")
+                
         elif len(icons) == 1:
             # Single option — click it
             click_x, click_y = icons[0][0], icons[0][1]

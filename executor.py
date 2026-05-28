@@ -73,15 +73,39 @@ class Executor:
         """
         Smooth drag from one frame position to another.
         Used for drawing/extending lines.
+        
+        Applies a strategic 20-pixel overshoot past the destination station
+        center to guarantee that the mouse triggers the snap-connection window.
         """
+        import math
+
         if duration is None:
             duration = config.DRAG_DURATION_SEC
+
+        # Calculate overshoot along the drag vector
+        dx = to_px[0] - from_px[0]
+        dy = to_px[1] - from_px[1]
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist > 0:
+            overshoot_dist = 20  # overshoot by 20 pixels
+            to_x = to_px[0] + (dx / dist) * overshoot_dist
+            to_y = to_px[1] + (dy / dist) * overshoot_dist
+            
+            # Keep within safe screen limits (typically 1920x1080)
+            max_w = 1910
+            max_h = 1070
+            if self._capture:
+                max_w = self._capture.width - 10
+                max_h = self._capture.height - 10
+            
+            to_x = max(10, min(to_x, max_w))
+            to_y = max(10, min(to_y, max_h))
+            to_px = (int(to_x), int(to_y))
 
         sx1, sy1 = self._to_screen(*from_px)
         sx2, sy2 = self._to_screen(*to_px)
 
-        logger.info(f"Drag from ({sx1},{sy1}) -> ({sx2},{sy2}) "
-                    f"duration={duration:.2f}s")
+        logger.info(f"Drag from ({sx1},{sy1}) -> ({sx2},{sy2}) with overshoot | duration={duration:.2f}s")
 
         pyautogui.moveTo(sx1, sy1)
         time.sleep(0.05)
